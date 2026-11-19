@@ -222,6 +222,70 @@ export function trueRetention(days, settings, n = 30, now = Date.now()) {
   return { count: tr, rate: tr ? 1 - fail / tr : null };
 }
 
+// ---- Review history stats (Anki "Reviews" graph) ----
+// days[k] may carry optional fields added later: ms (answer time sum), tc (answers timed), mt (mature reviews).
+export const MATURE_DAYS = 21;       // Anki: interval ≥ 21 days = mature
+export const ANSWER_CAP_MS = 60e3;   // Anki caps one answer at 60 s so a walk-away doesn't skew time
+// split one day's reviews into Anki's colours: new(learn) / again(relearn) / young / mature
+export function daySplit(d) {
+  if (!d) return { n: 0, ag: 0, young: 0, mt: 0, rv: 0, ms: 0, tc: 0 };
+  const rv = d.rv || 0, n = Math.min(rv, d.n || 0), ag = Math.min(rv - n, d.ag || 0), mt = Math.min(rv - n - ag, d.mt || 0);
+  return { n, ag, mt, young: rv - n - ag - mt, rv, ms: d.ms || 0, tc: d.tc || 0 };
+}
+function addDays(key, i) { const [y, m, d] = key.split('-').map(Number); const t = new Date(y, m - 1, d + i); return t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0'); }
+// range: number of days back (30/90/365), or 0 = since the first recorded day
+export function reviewHistory(days, settings, range = 30, now = Date.now()) {
+  const today = dayKey(settings, now);
+  const keys = Object.keys(days || {}).filter((k) => (days[k].rv || 0) > 0 && k <= today).sort();
+  const first = keys[0] || today;
+  const span = Math.round((Date.parse(today) - Date.parse(first)) / 86400e3) + 1;      // days since first study
+  const len = range ? range : Math.max(1, span);
+  const bsize = len <= 31 ? 1 : len <= 365 ? 7 : Math.ceil(len / 60);
+  const nb = Math.ceil(len / bsize);
+  const buckets = []; let cum = 0, cumMs = 0;
+  const tot = { rv: 0, ms: 0, tc: 0, studied: 0, msDays: 0 };
+  for (let b = 0; b < nb; b++) {
+    const x = { start: null, n: 0, ag: 0, young: 0, mt: 0, rv: 0, ms: 0 };
+    // buckets end at today; bucket b (oldest first) holds the days that are o days ago, o in [base, base+bsize)
+    const base = (nb - 1 - b) * bsize;
+    for (let j = bsize - 1; j >= 0; j--) {
+      const off = base + j;
+      if (off >= len) continue;
+      const k = addDays(today, -off); if (!x.start || k < x.start) x.start = k;
+      const s = daySplit(days[k]);
+      x.n += s.n; x.ag += s.ag; x.young += s.young; x.mt += s.mt; x.rv += s.rv; x.ms += s.ms;
+      tot.rv += s.rv; tot.ms += s.ms; tot.tc += s.tc; if (s.rv) tot.studied++; if (s.tc) tot.msDays++;
+    }
+    cum += x.rv; cumMs += x.ms; x.cum = cum; x.cumMs = cumMs; buckets.push(x);
+  }
+  // "period" like Anki: the shown range, but never before the first day you studied
+  const period = Math.max(1, Math.min(len, span));
+  return {
+    buckets, bucketDays: bsize, len, period, studied: tot.studied, total: tot.rv, totalMs: tot.ms, timed: tot.tc, timedDays: tot.msDays,
+    avgStudied: tot.studied ? tot.rv / tot.studied : 0, avgPeriod: tot.rv / period,
+    msStudied: tot.msDays ? tot.ms / tot.msDays : 0, msPeriod: tot.ms / period,
+    avgAnswerMs: tot.tc ? tot.ms / tot.tc : null,
+  };
+}
+// share of days studied in the last n days (Anki "Days studied"), counted from the first study day at most
+export function studyRate(days, settings, n = 30, now = Date.now()) {
+  const h = reviewHistory(days, settings, n, now);
+  return { studied: h.studied, period: h.period, rate: h.studied / h.period };
+}
+// minutes needed for `cards` answers at your recent pace (falls back to fallbackMs until ≥ 20 timed answers)
+export function estimateMs(cards, days, settings, fallbackMs = 10e3, now = Date.now()) {
+  const h = reviewHistory(days, settings, 30, now);
+  const per = h.timed >= 20 ? h.avgAnswerMs : fallbackMs;
+  return { ms: cards * per, measured: h.timed >= 20, per };
+}
+export function fmtDuration(ms) {
+  const s = ms / 1000;
+  if (s < 60) return Math.round(s) + '초';
+  const m = s / 60; if (m < 60) return Math.round(m) + '분';
+  const h = m / 60; if (h < 24) return (Math.round(h * 10) / 10) + '시간';
+  return (Math.round(h / 24 * 10) / 10) + '일';
+}
+
 export function humanInterval(ms) {
   const m = ms / 60e3;
   if (m < 1) return '<1분';

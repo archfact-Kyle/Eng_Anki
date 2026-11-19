@@ -10,7 +10,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const r = (...p) => path.join(root, ...p);
 
 // Bump this whenever you ship, so installed phones drop the old offline cache.
-const CACHE_VERSION = 'ankiwords-v5';
+const CACHE_VERSION = 'ankiwords-v6';
 
 const result = await build({
   entryPoints: [r('src/main.js')],

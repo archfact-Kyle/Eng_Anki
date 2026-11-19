@@ -172,3 +172,46 @@ test.describe('recorder', () => {
     await expect(page.locator('[data-act=rec-play]')).toBeVisible();
   });
 });
+
+test('stats: answer time + mature reviews are recorded, graph shows count and time', async ({ page }) => {
+  const errors = []; page.on('pageerror', (e) => errors.push(e.message));
+  await page.clock.install();
+  await page.goto('/');
+  const now = await page.evaluate(() => Date.now());
+  // history: studied on 20 of the last 40 days (day key = local date with the 4 am rollover)
+  const days = await page.evaluate(({ now, DAY }) => {
+    const key = (t) => { const d = new Date(t - 4 * 3600e3); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+    const out = {}; for (let i = 1; i <= 40; i += 2) out[key(now - i * DAY)] = { rv: 40 + i, n: 5, ag: 4, mt: i > 20 ? 20 : 5, ms: (40 + i) * 7000, tc: 40 + i };
+    return out;
+  }, { now, DAY });
+  await page.click('nav button[data-v=settings]');
+  await page.fill('#imp-text', JSON.stringify({ app: 'ankiwords', v: 1, exported: 'test', meta: { settings: {}, days }, notes: [sent('m', 'A mature one.', { rec: reviewCard(now, { sd: 30, s: 30 }) })] }));
+  await page.click('[data-act=imp-paste]');
+  await page.click('[data-ok]');
+  await page.click('nav button[data-v=home]');
+  await expect(page.locator('.est')).toContainText('예상');
+  await expect(page.locator('#view')).toContainText('학습한 날');
+  await page.screenshot({ path: 'test-results/stats-home.png', fullPage: true });
+  await page.click('nav button[data-v=review]');
+  await page.clock.runFor(4000);
+  await page.click('[data-act=show]');
+  await page.click('[data-grade="3"]');
+  await page.clock.runFor(1500);
+  const db = await readDB(page);
+  const today = Object.entries(db._meta.days).find(([k]) => !(k in days))[1];
+  expect(today.tc).toBe(1); expect(today.mt).toBe(1);
+  expect(today.ms).toBeGreaterThanOrEqual(4000); expect(today.ms).toBeLessThanOrEqual(60000);
+
+  await page.click('nav button[data-v=home]');
+  await page.click('[data-go=stats]');
+  await expect(page.locator('#stats-kv')).toContainText('학습한 날');
+  await expect(page.locator('#stats-kv')).toContainText('16 / 30일');
+  await page.screenshot({ path: 'test-results/stats-count.png', fullPage: true });
+  await page.click('[data-sm=time]');
+  await expect(page.locator('#stats-kv')).toContainText('평균 답변 시간');
+  await page.click('[data-sr="0"]');
+  await expect(page.locator('#stats-kv')).toContainText('21 / 40일');
+  await expect(page.locator('.chart rect').first()).toBeVisible();
+  await page.screenshot({ path: 'test-results/stats-time.png', fullPage: true });
+  expect(errors).toEqual([]);
+});

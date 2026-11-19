@@ -26,7 +26,7 @@ npm test                         # 단위(node:test) + e2e(Playwright, iPhone 13
 - 노트: `{id, type:'sent'|'cloze', text, ko, extra, src, tags, c(생성), u(수정), cards:{…}, del?}`
   - 문장: `cards.rec`(영→이해), 선택적으로 `cards.prod`(한→영 산출). 클로즈: `{{c1::답}}` 또는 `{{c1::답::힌트}}` → `cards.c1, c2 …`
 - 카드(압축 FSRS): `{due, s, d, ed, sd, r, l, ls, st, lr}` + 플래그 `sus`('leech'|'retired'|'known'|true), `bury`(ms), `fd`/`fc`(오늘 실패 횟수), `iv`(새 카드 소개 시각)
-- meta: `{settings, days:{'YYYY-MM-DD':{rv,n,ag,tr,trf}}, lastBackup, u}` — 하루 경계는 `dayStartHour`(기본 4시)
+- meta: `{settings, days:{'YYYY-MM-DD':{rv,n,ag,tr,trf, ms?,tc?,mt?}}, lastBackup, u}` — 하루 경계는 `dayStartHour`(기본 4시). `ms`=답변 시간 합(장당 60초 상한, 백그라운드 제외), `tc`=시간 잰 답변 수, `mt`=성숙(직전 간격 ≥21일) 카드 통과 수 — 없는 날은 0
 - 필드 이름을 바꾸거나 지우지 말 것. 새 필드는 없을 때도 동작하게(기본값) 추가. 백업 JSON(`app:'ankiwords', v:1`) 형식도 유지.
 
 ## 학습 규칙 (의도된 설계 — 근거는 docs/learning-methods.md)

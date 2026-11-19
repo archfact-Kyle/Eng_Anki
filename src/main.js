@@ -3,6 +3,7 @@ import {
   DEFAULT_SETTINGS, Rating, State, makeNote, syncCards, buildQueues, pickNext, previewIntervals, answer,
   humanInterval, renderCloze, clozeAnswer, stripCloze, isCloze, splitSentences, dayKey, esc, wordDiff,
   parseDelimited, newCardState, uid, isLeechHit, trueRetention, endOfDay, slowThresholdMs,
+  MATURE_DAYS, ANSWER_CAP_MS, reviewHistory, studyRate, estimateMs, fmtDuration,
 } from './core.js';
 import { SAMPLE_SENTENCES, SAMPLE_CLOZES } from './samples.js';
 
@@ -116,7 +117,7 @@ function forecast(days = 7) {
 function render(keepScroll) {
   document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('on', b.dataset.v === view));
   const y = window.scrollY;
-  ({ home: renderHome, review: renderReview, add: renderAdd, browse: renderBrowse, settings: renderSettings })[view]();
+  ({ home: renderHome, review: renderReview, add: renderAdd, browse: renderBrowse, settings: renderSettings, stats: renderStats })[view]();
   window.scrollTo(0, keepScroll ? y : 0);
 }
 function go(v) { view = v; if (v === 'review') { sess.item = null; } render(); }
@@ -136,6 +137,9 @@ function renderHome() {
   const maxD = Math.max(10, ...days.map((d) => d.v));
   const fc = forecast(7); const maxF = Math.max(10, ...fc);
   const tr = trueRetention(store.meta.days, settings);
+  const sr = studyRate(store.meta.days, settings, 30);
+  const left = c.fresh + c.learn + c.review;
+  const est = left ? estimateMs(left, store.meta.days, settings) : null;
   const trNote = tr.count < 30 ? '<p class="small muted">실제 기억률은 복습 단계 카드가 30번 이상 쌓이면 판단할 수 있어요 (목표 75~90%).</p>'
     : tr.rate < 0.7 ? '<p class="note warn">기억률이 70% 미만이에요 → 설정에서 목표 기억률을 올리거나, 리치를 정리하고 더 쉬운 예문으로 바꾸세요.</p>'
     : tr.rate > 0.9 ? '<p class="note">기억률이 90%를 넘어요 → 너무 자주 복습 중입니다. 목표 기억률을 낮추면 복습량이 줄어요.</p>'
@@ -148,6 +152,7 @@ function renderHome() {
   <section class="card due">
     <div class="nums"><div><b class="blue">${c.fresh}</b><span>새 카드</span></div><div><b class="red">${c.learn}</b><span>학습 중</span></div><div><b class="green">${c.review}</b><span>복습</span></div></div>
     <button class="btn primary big" data-go="review" ${c.fresh + c.learn + c.review ? '' : 'disabled'}>${c.fresh + c.learn + c.review ? '복습 시작' : '오늘 할 카드 완료 🎉'}</button>
+    ${est ? `<p class="small est">⏱ 예상 약 ${fmtDuration(Math.max(60e3, est.ms))}${est.measured ? ` · 내 평균 ${(est.per / 1000).toFixed(1)}초/장` : ' (기록이 쌓이면 내 속도로 계산해요)'}</p>` : ''}
     <p class="muted small">오늘 ${t.rv}장 복습 · 새 카드 ${t.n}/${settings.newPerDay} · 대기 중인 새 카드 ${c.freshTotal}장</p>
     ${c.q.backlog ? `<p class="note warn">📦 밀린 카드 ${c.q.overdue}장 — 기억할 가능성이 높은 순서로 하루 ${settings.maxReviews}장까지만 보여드려요. 매일 조금씩 줄이면 됩니다.</p>` : ''}
     ${c.q.learnFlood ? `<p class="note warn">⏸ 학습 중인 카드가 ${c.learn}장(${settings.learnCap}장 이상)이라 새 카드를 잠시 멈췄어요.</p>` : ''}
@@ -155,10 +160,10 @@ function renderHome() {
   <section class="card">
     <div class="row between"><h3>1만 문장 목표</h3><span class="muted">${total.toLocaleString()} / ${goal.toLocaleString()}</span></div>
     <div class="bar"><i style="width:${Math.min(100, total / goal * 100).toFixed(2)}%"></i></div>
-    <div class="row between small muted"><span>🔥 연속 ${streak()}일</span><span>실제 기억률(30일) ${tr.rate == null ? '–' : Math.round(tr.rate * 100) + '%'}</span></div>
+    <div class="row between small muted"><span>📅 학습한 날 ${sr.studied}/${sr.period}일 · 🔥 연속 ${streak()}일</span><span>실제 기억률(30일) ${tr.rate == null ? '–' : Math.round(tr.rate * 100) + '%'}</span></div>
     ${trNote}
   </section>
-  <section class="card"><h3>최근 14일 복습</h3><div class="spark">${days.map((d) => `<i title="${d.k}: ${d.v}" style="height:${(d.v / maxD * 100).toFixed(0)}%"></i>`).join('')}</div></section>
+  <section class="card"><div class="row between"><h3>최근 14일 복습</h3><button class="link" data-go="stats">📊 통계 자세히</button></div><div class="spark">${days.map((d) => `<i title="${d.k}: ${d.v}" style="height:${(d.v / maxD * 100).toFixed(0)}%"></i>`).join('')}</div></section>
   <section class="card"><h3>앞으로 7일 예정</h3><div class="spark f">${fc.map((v, i) => `<div><i style="height:${(v / maxF * 100).toFixed(0)}%"></i><small>${i === 0 ? '오늘' : '+' + i}</small><small>${v}</small></div>`).join('')}</div></section>
   <details class="card guide"><summary>학습법 안내 (AJATT · MCD · Antimoon)</summary>
     <ol>
@@ -173,6 +178,80 @@ function renderHome() {
       <li><b>인풋이 먼저</b> — 카드는 보조입니다. 하루 대부분은 읽기·듣기, Anki는 그중 건진 문장을 붙잡아 두는 도구입니다.</li>
     </ol>
   </details>`;
+}
+
+// ----- stats (Anki "Reviews" graph: count or time, 1m / 3m / 1y / all) -----
+let statsMode = 'count', statsRange = 30;
+function statsChart(h, time) {
+  const W = 320, H = 150, bw = W / h.buckets.length, gap = bw > 4 ? 1 : 0;
+  const val = (b) => time ? b.ms : b.rv;
+  const max = Math.max(time ? 60e3 : 5, ...h.buckets.map(val));
+  const cumMax = Math.max(1, time ? h.totalMs : h.total);
+  let rects = '';
+  h.buckets.forEach((b, i) => {
+    const x = (i * bw).toFixed(2), w = Math.max(0.5, bw - gap).toFixed(2);
+    const tip = `${b.start}${h.bucketDays > 1 ? ' 부터 ' + h.bucketDays + '일' : ''}: ${b.rv}장 · ${fmtDuration(b.ms)}`;
+    let y = H;
+    // time is stored per day, not per colour → split the bar in the same proportions as the counts
+    const segs = [['mt', 'mat'], ['young', 'yng'], ['ag', 'rel'], ['n', 'lrn']];
+    rects += `<g><title>${esc(tip)}</title>`;
+    for (const [k, cls] of segs) {
+      if (!b[k]) continue;
+      const part = time ? (b.rv ? b.ms * b[k] / b.rv : 0) : b[k];
+      const hh = part / max * H; if (hh <= 0) continue;
+      y -= hh; rects += `<rect class="${cls}" x="${x}" y="${y.toFixed(2)}" width="${w}" height="${hh.toFixed(2)}"/>`;
+    }
+    rects += '</g>';
+  });
+  const pts = [`0,${H}`, ...h.buckets.map((b, i) => `${((i + 1) * bw).toFixed(2)},${(H - (time ? b.cumMs : b.cum) / cumMax * H).toFixed(2)}`)];
+  const fmt = (v) => time ? fmtDuration(v) : Math.round(v).toLocaleString();
+  const startLbl = h.buckets[0].start.slice(5).replace('-', '/');
+  return `<div class="chart">
+    <div class="axis"><span>${fmt(max)}</span><span class="cumv">누적 ${fmt(cumMax)}</span></div>
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${time ? '복습 시간' : '복습 횟수'} 그래프">
+      <polygon class="cum" points="${pts.join(' ')} ${W},${H}"/>${rects}
+    </svg>
+    <div class="axis"><span>${startLbl}</span><span>오늘</span></div>
+  </div>`;
+}
+function renderStats() {
+  const days = store.meta.days || {};
+  const h = reviewHistory(days, settings, statsRange);
+  const time = statsMode === 'time';
+  const pct = (h.studied / h.period * 100).toFixed(1);
+  const sr30 = studyRate(days, settings, 30);
+  const rows = time ? [
+    ['총 시간', fmtDuration(h.totalMs)],
+    ['학습한 날 평균', h.timedDays ? fmtDuration(h.msStudied) + '/일' : '–'],
+    ['전체 기간 평균', fmtDuration(h.msPeriod) + '/일'],
+    ['평균 답변 시간', h.avgAnswerMs == null ? '–' : `${(h.avgAnswerMs / 1000).toFixed(2)}초 (분당 ${(60e3 / h.avgAnswerMs).toFixed(1)}장)`],
+  ] : [
+    ['합계', h.total.toLocaleString() + '장'],
+    ['학습한 날 평균', Math.round(h.avgStudied) + '장/일'],
+    ['전체 기간 평균', Math.round(h.avgPeriod) + '장/일'],
+  ];
+  const timeNote = time && h.timedDays < h.studied ? `<p class="small muted">답변 시간은 이번 업데이트 이후 복습부터 기록돼요. 그 전 ${h.studied - h.timedDays}일은 0으로 보입니다.</p>` : '';
+  const rateMsg = sr30.rate >= 0.9 ? '아주 꾸준해요.' : sr30.rate >= 0.7 ? '충분히 꾸준해요. 13년 동안 111만 번 복습한 사람도 학습한 날은 79%였어요.' : '빠진 날이 많아요. 하루 몇 장이라도 열어 보면 밀린 카드가 덜 쌓여요.';
+  app().innerHTML = `
+  <header class="hero"><h1>통계</h1><p class="sub">답한 카드 수와 걸린 시간</p></header>
+  <section class="card">
+    <div class="seg" data-seg="mode"><button data-sm="count" class="${time ? '' : 'on'}">횟수</button><button data-sm="time" class="${time ? 'on' : ''}">시간</button></div>
+    <div class="seg"><button data-sr="30" class="${statsRange === 30 ? 'on' : ''}">1개월</button><button data-sr="90" class="${statsRange === 90 ? 'on' : ''}">3개월</button><button data-sr="365" class="${statsRange === 365 ? 'on' : ''}">1년</button><button data-sr="0" class="${statsRange === 0 ? 'on' : ''}">전체</button></div>
+    ${statsChart(h, time)}
+    <div class="legend small"><span><i class="lrn"></i>새 카드</span><span><i class="rel"></i>다시</span><span><i class="yng"></i>어린 카드</span><span><i class="mat"></i>성숙 카드(간격 ${MATURE_DAYS}일+)</span></div>
+    <dl class="kv" id="stats-kv"><dt>학습한 날</dt><dd>${h.studied.toLocaleString()} / ${h.period.toLocaleString()}일 (${pct}%)</dd>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
+    ${timeNote}
+  </section>
+  <section class="card">
+    <h3>꾸준함</h3>
+    <p class="small">최근 30일 중 <b>${sr30.studied}일</b> 학습 (${Math.round(sr30.rate * 100)}%) · 🔥 연속 ${streak()}일</p>
+    <p class="small muted">${rateMsg} 연속 기록이 끊겨도 괜찮아요. 오래 보면 <b>학습한 날 비율</b>이 더 중요합니다.</p>
+  </section>
+  <section class="card">
+    <h3>그래프 읽는 법</h3>
+    <p class="small muted">성숙 카드(진한 초록)가 늘수록 망각곡선이 완만해진 문장이 많다는 뜻이에요. 그런 카드는 몇 주~몇 달 간격으로만 나와서, 덱이 커져도 하루 복습량은 일정한 선에서 멈춥니다. 빨간 부분(다시)이 전체의 10~25%면 정상이에요.</p>
+  </section>
+  <button class="btn" data-go="home">← 홈으로</button>`;
 }
 
 // ----- review -----
@@ -338,10 +417,13 @@ function grade(r) {
     next.sus = 'retired';
     msg = ['다음 복습이 ' + humanInterval(next.sd * 86400e3) + ' 뒤라 은퇴시켰어요 (복습량 관리)', [{ label: '취소', fn: () => { const n = store.notes.get(note.id); if (n && n.cards[it.key]) { delete n.cards[it.key].sus; store.putNote(n); } } }]];
   }
-  sess.undo = { id: note.id, key: it.key, prev: { ...prev }, day: tk, wasNew, wasReview, again };
+  // answer time (background time excluded, capped like Anki) and mature = interval before this review ≥ 21 days
+  const ms = Math.min(ANSWER_CAP_MS, Math.max(0, Math.round(elapsedMs())));
+  const mature = wasReview && !again && (prev.sd || 0) >= MATURE_DAYS;
+  sess.undo = { id: note.id, key: it.key, prev: { ...prev }, day: tk, wasNew, wasReview, again, ms, mature };
   note.cards[it.key] = next;
   store.putNote(note);
-  bumpToday((d) => { d.rv++; if (wasNew) d.n++; if (again) d.ag = (d.ag || 0) + 1; if (wasReview) { d.tr = (d.tr || 0) + 1; if (again) d.trf = (d.trf || 0) + 1; } });
+  bumpToday((d) => { d.rv++; if (wasNew) d.n++; if (again) d.ag = (d.ag || 0) + 1; if (wasReview) { d.tr = (d.tr || 0) + 1; if (again) d.trf = (d.trf || 0) + 1; } d.ms = (d.ms || 0) + ms; d.tc = (d.tc || 0) + 1; if (mature) d.mt = (d.mt || 0) + 1; });
   sess.count++; sess.lastNote = note.id;
   sess.item = null; render();
   if (msg) toast(msg[0], msg[1]);
@@ -351,7 +433,7 @@ function undo() {
   const u = sess.undo; if (!u) return; const note = store.notes.get(u.id); if (!note || !note.cards[u.key]) return;
   note.cards[u.key] = u.prev; store.putNote(note);
   if (u.intro) store.putMeta((m) => { const d = m.days[u.day]; if (d && u.wasNew) d.n = Math.max(0, d.n - 1); });
-  else store.putMeta((m) => { const d = m.days[u.day]; if (d) { d.rv = Math.max(0, d.rv - 1); if (u.wasNew) d.n = Math.max(0, d.n - 1); if (u.again) d.ag = Math.max(0, (d.ag || 0) - 1); if (u.wasReview) { d.tr = Math.max(0, (d.tr || 0) - 1); if (u.again) d.trf = Math.max(0, (d.trf || 0) - 1); } } });
+  else store.putMeta((m) => { const d = m.days[u.day]; if (d) { d.rv = Math.max(0, d.rv - 1); if (u.wasNew) d.n = Math.max(0, d.n - 1); if (u.again) d.ag = Math.max(0, (d.ag || 0) - 1); if (u.wasReview) { d.tr = Math.max(0, (d.tr || 0) - 1); if (u.again) d.trf = Math.max(0, (d.trf || 0) - 1); } if (u.ms != null && d.tc) { d.ms = Math.max(0, (d.ms || 0) - u.ms); d.tc--; } if (u.mature && d.mt) d.mt--; } });
   sess.undo = null; sess.count = Math.max(0, sess.count - 1);
   const q = currentQueue(); const all = [...q.learn, ...q.review, ...q.fresh, ...q.laterLearn];
   sess.item = all.find((x) => x.note.id === u.id && x.key === u.key) || null; sess.q = q; sess.side = 'front'; sess.typed = '';
@@ -623,6 +705,8 @@ document.addEventListener('click', (e) => {
   const say = t.closest('[data-say]'); if (say) { e.stopPropagation(); return speak(say.dataset.say); }
   const g = t.closest('[data-grade]'); if (g) return grade(+g.dataset.grade);
   const mode = t.closest('[data-mode]'); if (mode) { addMode = mode.dataset.mode; return renderAdd(); }
+  const sm = t.closest('[data-sm]'); if (sm) { statsMode = sm.dataset.sm; return render(true); }
+  const sr = t.closest('[data-sr]'); if (sr) { statsRange = +sr.dataset.sr; return render(true); }
   const flt = t.closest('[data-filter]'); if (flt) { browseFilter = flt.dataset.filter; return renderBrowse(); }
   const li = t.closest('.list li[data-id]'); if (li) return editNote(li.dataset.id);
   const tok = t.closest('[data-tok]'); if (tok) { const i = +tok.dataset.tok; mcdSel.has(i) ? mcdSel.delete(i) : mcdSel.add(i); const y = window.scrollY; const ko = $('#m-ko')?.value, ex = $('#m-ex')?.value, src = $('#m-src')?.value; renderAdd(); if (ko != null) { $('#m-ko').value = ko; $('#m-ex').value = ex; $('#m-src').value = src; } window.scrollTo(0, y); return; }
