@@ -3,7 +3,7 @@ import {
   DEFAULT_SETTINGS, Rating, State, makeNote, syncCards, buildQueues, pickNext, previewIntervals, answer,
   humanInterval, renderCloze, clozeAnswer, stripCloze, isCloze, splitSentences, dayKey, esc, wordDiff,
   parseDelimited, newCardState, uid, isLeechHit, trueRetention, endOfDay, slowThresholdMs,
-  MATURE_DAYS, ANSWER_CAP_MS, reviewHistory, studyRate, estimateMs, fmtDuration,
+  MATURE_DAYS, ANSWER_CAP_MS, reviewHistory, studyRate, estimateMs, fmtDuration, dueForecast, simulateLoad,
 } from './core.js';
 import { SAMPLE_SENTENCES, SAMPLE_CLOZES } from './samples.js';
 
@@ -103,15 +103,7 @@ function streak() {
   }
   return s;
 }
-function forecast(days = 7) {
-  const out = new Array(days).fill(0); const now = Date.now();
-  const k0 = dayKey(settings, now);
-  for (const note of store.liveNotes()) for (const c of Object.values(note.cards || {})) {
-    if (c.sus || c.st === State.New) continue;
-    for (let i = 0; i < days; i++) { if (dayKey(settings, Math.max(c.due, now)) === dayKey(settings, now + i * 86400e3)) { out[i]++; break; } }
-  }
-  void k0; return out;
-}
+function forecast(days = 7) { return dueForecast(store.liveNotes(), settings, days).days.map((d) => d.review + d.learn); }
 
 // ---------------- render ----------------
 function render(keepScroll) {
@@ -214,6 +206,45 @@ function statsChart(h, time) {
     <div class="axis"><span>${startLbl}</span><span>오늘</span></div>
   </div>`;
 }
+// ----- workload forecast: real due dates (30 days) + FSRS simulation (1 year) -----
+let simNew = null; const simCache = { key: '', res: null };
+function barSvg(vals, cls, H = 110) {
+  const W = 320, bw = W / vals.length, gap = bw > 4 ? 1 : 0, max = Math.max(5, ...vals.map((v) => v.reduce((a, b) => a + b, 0)));
+  let s = '';
+  vals.forEach((parts, i) => { let y = H; parts.forEach((v, j) => { const hh = v / max * H; if (hh <= 0) return; y -= hh; s += `<rect class="${cls[j]}" x="${(i * bw).toFixed(2)}" y="${y.toFixed(2)}" width="${Math.max(0.5, bw - gap).toFixed(2)}" height="${hh.toFixed(2)}"/>`; }); });
+  return { svg: `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="height:${H}px">${s}</svg>`, max };
+}
+function forecastSection() {
+  const notes = store.liveNotes();
+  const fc = dueForecast(notes, settings, 30);
+  const tot = fc.days.map((d) => d.review + d.learn);
+  const sum7 = tot.slice(0, 7).reduce((a, b) => a + b, 0), avg30 = tot.reduce((a, b) => a + b, 0) / 30;
+  const per = estimateMs(1, store.meta.days, settings).per;
+  const b1 = barSvg(fc.days.map((d) => [d.review, d.learn]), ['mat', 'rel']);
+  const npd = simNew == null ? settings.newPerDay : simNew;
+  const choices = [...new Set([0, 10, settings.newPerDay, 30])].sort((a, b) => a - b);
+  const key = [notes.length, store.meta.u || 0, npd, settings.retention, settings.maxReviews, settings.retireYears, dayKey(settings)].join('|');
+  if (simCache.key !== key) { simCache.key = key; simCache.res = simulateLoad(notes, settings, { days: 365, newPerDay: npd }); }
+  const sim = simCache.res;
+  const weeks = []; for (let w = 0; w < 52; w++) { const s = sim.days.slice(w * 7, w * 7 + 7); weeks.push([s.reduce((a, x) => a + x.rv, 0) / s.length]); }
+  const b2 = barSvg(weeks, ['pri']);
+  const line = (label, v) => `<dt>${label}</dt><dd>${Math.round(v)}장/일 · 약 ${fmtDuration(v * per)}</dd>`;
+  return `<section class="card" id="forecast">
+    <h3>앞으로 30일 예정</h3>
+    ${tot.some((v) => v) ? `<div class="chart"><div class="axis"><span>${b1.max}</span><span></span></div>${b1.svg}<div class="axis"><span>오늘</span><span>+29일</span></div></div>
+    <div class="legend small"><span><i class="mat"></i>복습</span><span><i class="rel"></i>학습 중</span></div>` : '<p class="small muted">앞으로 30일 동안 예정된 복습이 없어요.</p>'}
+    <dl class="kv"><dt>오늘</dt><dd>${tot[0]}장${fc.overdue ? ` (밀린 ${fc.overdue}장 포함)` : ''}</dd><dt>내일</dt><dd>${tot[1]}장</dd><dt>7일 합계</dt><dd>${sum7}장</dd><dt>30일 평균</dt><dd>${Math.round(avg30)}장/일</dd></dl>
+    <p class="small muted">지금 있는 카드만 센 거예요. 새 카드를 넣으면 늘어납니다.</p>
+  </section>
+  <section class="card">
+    <h3>1년 복습량 예측</h3>
+    <p class="small muted">새 문장을 하루 몇 장씩 넣을 때를 가정할까요?</p>
+    <div class="seg">${choices.map((c) => `<button data-sn="${c}" class="${c === npd ? 'on' : ''}">${c}장${c === settings.newPerDay ? '·현재' : ''}</button>`).join('')}</div>
+    <div class="chart"><div class="axis"><span>${Math.round(b2.max)}장/일</span><span>주 평균</span></div>${b2.svg}<div class="axis"><span>이번 주</span><span>6개월</span><span>1년 뒤</span></div></div>
+    <dl class="kv" id="sim-kv">${line('첫 주', sim.first)}${line('1개월 뒤', sim.m1)}${line('3개월 뒤', sim.m3)}${line('1년 뒤', sim.y1)}</dl>
+    <p class="small muted">망각곡선(FSRS)으로 계산했어요. 카드마다 기억률이 목표 ${Math.round(settings.retention * 100)}%로 떨어질 때 복습이 잡히고, 그때 기억률만큼의 확률로 맞힌다고 가정합니다. 하루 ${settings.maxReviews}장을 넘으면 다음 날로 넘어가요. 오래 복습한 카드는 간격이 길어져서, 새 카드를 꾸준히 넣어도 하루 복습량은 대략 <b>새 카드 수 × 10장</b> 근처에서 완만해집니다. 시간은 내 평균 답변 속도(${(per / 1000).toFixed(1)}초/장) 기준이에요.</p>
+  </section>`;
+}
 function renderStats() {
   const days = store.meta.days || {};
   const h = reviewHistory(days, settings, statsRange);
@@ -242,6 +273,7 @@ function renderStats() {
     <dl class="kv" id="stats-kv"><dt>학습한 날</dt><dd>${h.studied.toLocaleString()} / ${h.period.toLocaleString()}일 (${pct}%)</dd>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
     ${timeNote}
   </section>
+  ${forecastSection()}
   <section class="card">
     <h3>꾸준함</h3>
     <p class="small">최근 30일 중 <b>${sr30.studied}일</b> 학습 (${Math.round(sr30.rate * 100)}%) · 🔥 연속 ${streak()}일</p>
@@ -707,6 +739,7 @@ document.addEventListener('click', (e) => {
   const mode = t.closest('[data-mode]'); if (mode) { addMode = mode.dataset.mode; return renderAdd(); }
   const sm = t.closest('[data-sm]'); if (sm) { statsMode = sm.dataset.sm; return render(true); }
   const sr = t.closest('[data-sr]'); if (sr) { statsRange = +sr.dataset.sr; return render(true); }
+  const sn = t.closest('[data-sn]'); if (sn) { simNew = +sn.dataset.sn; return render(true); }
   const flt = t.closest('[data-filter]'); if (flt) { browseFilter = flt.dataset.filter; return renderBrowse(); }
   const li = t.closest('.list li[data-id]'); if (li) return editNote(li.dataset.id);
   const tok = t.closest('[data-tok]'); if (tok) { const i = +tok.dataset.tok; mcdSel.has(i) ? mcdSel.delete(i) : mcdSel.add(i); const y = window.scrollY; const ko = $('#m-ko')?.value, ex = $('#m-ex')?.value, src = $('#m-src')?.value; renderAdd(); if (ko != null) { $('#m-ko').value = ko; $('#m-ex').value = ex; $('#m-src').value = src; } window.scrollTo(0, y); return; }

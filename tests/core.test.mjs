@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_SETTINGS as S, makeNote, buildQueues, pickNext, answer, newCardState, Rating, State,
   clozeNumbers, renderCloze, splitSentences, wordDiff, parseDelimited, isLeechHit, trueRetention, dayKey, slowThresholdMs,
-  daySplit, reviewHistory, studyRate, estimateMs, fmtDuration,
+  daySplit, reviewHistory, studyRate, estimateMs, fmtDuration, dueForecast, simulateLoad,
 } from '../src/core.js';
 
 const DAY = 86400e3;
@@ -135,4 +135,35 @@ test('studyRate and time estimate (falls back until 20 timed answers)', () => {
   const e = estimateMs(10, days, S, 10e3, now); assert.equal(e.measured, true); assert.equal(e.per, 5e3); assert.equal(e.ms, 50e3);
   assert.equal(estimateMs(10, {}, S, 10e3, now).measured, false);
   assert.equal(fmtDuration(30e3), '30초'); assert.equal(fmtDuration(25 * 60e3), '25분'); assert.equal(fmtDuration(3 * 86400e3), '3일');
+});
+
+test('dueForecast: overdue counts today, suspended and un-introduced new cards excluded', () => {
+  const now = Date.parse('2026-11-20T12:00:00');
+  const n = (id, cards) => ({ id, type: 'sent', text: id, c: 1, cards });
+  const notes = [
+    n('a', { rec: reviewCard({ due: now - 3 * DAY }) }),                  // overdue → today
+    n('b', { rec: reviewCard({ due: now + 2 * DAY }) }),
+    n('c', { rec: reviewCard({ due: now + 2 * DAY, sus: 'leech' }) }),
+    n('d', { rec: { ...newCardState(new Date(now)) } }),                  // never shown: not a review yet
+    n('e', { rec: { ...newCardState(new Date(now)), iv: now, due: now + 60e3 } }), // introduced → first test today
+    n('f', { rec: reviewCard({ due: now + 40 * DAY }) }),                 // outside the window
+  ];
+  const f = dueForecast(notes, S, 30, now);
+  assert.equal(f.days.length, 30); assert.equal(f.overdue, 1);
+  assert.deepEqual([f.days[0].review, f.days[0].learn], [1, 1]);
+  assert.equal(f.days[2].review, 1);
+  assert.equal(f.days.reduce((a, d) => a + d.review + d.learn, 0), 3);
+});
+
+test('simulateLoad: deterministic, more new cards → more reviews, daily cap respected', () => {
+  const now = Date.parse('2026-11-20T12:00:00');
+  const notes = []; for (let i = 0; i < 300; i++) notes.push({ id: 'n' + i, type: 'sent', text: 'x', c: i, cards: { rec: reviewCard({ due: now + (i % 30) * DAY, s: 5 + i % 50, sd: 5 + i % 50, lr: now - 10 * DAY }) } });
+  const a = simulateLoad(notes, S, { days: 120, newPerDay: 0, now });
+  const b = simulateLoad(notes, S, { days: 120, newPerDay: 0, now });
+  assert.deepEqual(a.days.map((d) => d.rv), b.days.map((d) => d.rv));           // seeded → same result every open
+  const c = simulateLoad(notes, S, { days: 120, newPerDay: 20, now });
+  assert.ok(c.m3 > a.m3 + 50, `20 new/day should add load (${c.m3} vs ${a.m3})`);
+  assert.ok(a.m3 < a.first, 'with no new cards the load shrinks as intervals grow');
+  const capped = simulateLoad(notes.map((x) => ({ ...x, cards: { rec: { ...x.cards.rec, due: now - DAY } } })), { ...S, maxReviews: 50 }, { days: 10, newPerDay: 0, now });
+  assert.ok(capped.days[0].rv <= 50 * 2 && capped.days[0].backlog > 0, 'overflow rolls to the next day');
 });

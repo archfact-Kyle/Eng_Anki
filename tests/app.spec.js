@@ -213,5 +213,13 @@ test('stats: answer time + mature reviews are recorded, graph shows count and ti
   await expect(page.locator('#stats-kv')).toContainText('21 / 40일');
   await expect(page.locator('.chart rect').first()).toBeVisible();
   await page.screenshot({ path: 'test-results/stats-time.png', fullPage: true });
+  await expect(page.locator('#forecast')).toContainText('내일');
+  await expect(page.locator('#sim-kv')).toContainText('1년 뒤');
+  const before = await page.locator('#sim-kv').textContent();
+  await page.click('[data-sn="30"]');
+  await expect(page.locator('[data-sn="30"]')).toHaveClass(/on/);
+  expect(await page.locator('#sim-kv').textContent()).not.toBe(before);
+  await page.locator('#forecast').scrollIntoViewIfNeeded();
+  await page.screenshot({ path: 'test-results/stats-forecast.png', fullPage: true });
   expect(errors).toEqual([]);
 });

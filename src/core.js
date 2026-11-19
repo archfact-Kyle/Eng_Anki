@@ -338,3 +338,67 @@ export function parseDelimited(text) {
   if (field !== '' || row.length) { row.push(field); rows.push(row); }
   return rows.filter((r) => r.some((c) => c.trim()) && !(r[0] || '').startsWith('#'));
 }
+
+// ---- Workload forecast (Anki "Future Due" + a FSRS simulation of the next months) ----
+function dayIndex(settings, t, now) { return Math.round((Date.parse(dayKey(settings, t)) - Date.parse(dayKey(settings, now))) / 86400e3); }
+const isActive = (c) => !c.sus && (c.st !== State.New || c.iv);
+// real cards: how many come due each day (overdue → today). Suspended / not-yet-introduced new cards excluded.
+export function dueForecast(notes, settings, days = 30, now = Date.now()) {
+  const out = Array.from({ length: days }, (_, i) => ({ k: dayKey(settings, now + i * 86400e3), review: 0, learn: 0 }));
+  let overdue = 0;
+  for (const note of notes) {
+    if (note.del) continue;
+    for (const c of Object.values(note.cards || {})) {
+      if (!isActive(c)) continue;
+      const due = Math.max(c.due, c.bury || 0);
+      const i = Math.max(0, dayIndex(settings, due, now)); if (i >= days) continue;
+      if (dayIndex(settings, due, now) < 0) overdue++;
+      out[i][c.st === State.Review ? 'review' : 'learn']++;
+    }
+  }
+  return { days: out, overdue };
+}
+// mulberry32: small seeded RNG so the simulation is the same every time you open the screen
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+// Simulate the next `days` days with FSRS: every due card is recalled with probability R (its retrievability),
+// you add `newPerDay` new cards a day, at most settings.maxReviews reviews a day (the rest roll over, like the app).
+// Day-level model: same-day learning steps are approximated (+1 per new card, +1 per lapse).
+export const SIM_EXTRA_NEW = 1, SIM_EXTRA_LAPSE = 1;
+export function simulateLoad(notes, settings, { days = 365, newPerDay = settings.newPerDay, seed = 7, now = Date.now() } = {}) {
+  const f = fsrs(generatorParameters({ request_retention: settings.retention, maximum_interval: 36500, enable_fuzz: false, enable_short_term: false }));
+  const rand = rng(seed); const DAY = 86400e3;
+  const t0 = endOfDay(settings, now) - DAY + 12 * 3600e3;           // review "at noon" of each simulated day
+  const queue = Array.from({ length: days + 1 }, () => []);
+  const retireDays = settings.retireYears ? settings.retireYears * 365 : Infinity;
+  for (const note of notes) {
+    if (note.del) continue;
+    for (const c of Object.values(note.cards || {})) {
+      if (!isActive(c)) continue;
+      const i = Math.max(0, dayIndex(settings, c.due, now)); if (i >= days) continue;
+      const card = unpackCard(c);
+      if (c.st === State.New) { card.state = State.New; }      // introduced, first test pending
+      queue[i].push(card);
+    }
+  }
+  const out = []; const cap = settings.maxReviews || Infinity;
+  for (let d = 0; d < days; d++) {
+    const at = new Date(t0 + d * DAY);
+    let todo = queue[d]; if (todo.length > cap) { queue[d + 1].push(...todo.slice(cap)); todo = todo.slice(0, cap); }
+    const fresh = Array.from({ length: newPerDay }, () => createEmptyCard(at));
+    let rv = 0, ag = 0, nw = fresh.length;
+    for (const card of [...todo, ...fresh]) {
+      const isNew = card.state === State.New;
+      const R = isNew ? 1 : f.get_retrievability(card, at, false);
+      const pass = isNew ? true : rand() < R;
+      rv += 1 + (isNew ? SIM_EXTRA_NEW : 0);
+      if (!pass) { ag++; rv += SIM_EXTRA_LAPSE; }
+      const next = f.next(card, at, pass ? Rating.Good : Rating.Again).card;
+      if (next.scheduled_days >= retireDays) continue;
+      const di = d + Math.max(1, Math.round((+next.due - +at) / DAY));
+      if (di < days) queue[di].push(next);
+    }
+    out.push({ rv, ag, n: nw, backlog: queue[d + 1] ? queue[d + 1].length : 0 });
+  }
+  const avg = (a, b) => { const s = out.slice(a, b); return s.length ? s.reduce((x, y) => x + y.rv, 0) / s.length : 0; };
+  return { days: out, first: avg(0, 7), m1: avg(23, 37), m3: avg(83, 97), y1: avg(Math.max(0, days - 14), days), peak: Math.max(0, ...out.map((x) => x.rv)) };
+}
