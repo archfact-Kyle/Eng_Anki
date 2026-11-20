@@ -10,11 +10,11 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const r = (...p) => path.join(root, ...p);
 
 // Bump this whenever you ship, so installed phones drop the old offline cache.
-const CACHE_VERSION = 'ankiwords-v7';
+const CACHE_VERSION = 'ankiwords-v8';
 
 const result = await build({
   entryPoints: [r('src/main.js')],
-  bundle: true, format: 'iife', minify: true, target: 'safari15', write: false, logLevel: 'warning',
+  bundle: true, format: 'iife', minify: true, target: 'safari15', write: false, define: { __APP_VERSION__: JSON.stringify(CACHE_VERSION) }, logLevel: 'warning',
 });
 const js = result.outputFiles[0].text;
 if (js.toLowerCase().includes('</script')) throw new Error('bundle contains </script> — would break inlining');
@@ -43,6 +43,9 @@ self.addEventListener('install',e=>{e.waitUntil(caches.open(C).then(c=>c.addAll(
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(ks=>Promise.all(ks.filter(k=>k!==C).map(k=>caches.delete(k)))));self.clients.claim();});
 self.addEventListener('fetch',e=>{if(e.request.method!=='GET')return;e.respondWith(fetch(e.request).then(r=>{const cp=r.clone();caches.open(C).then(c=>c.put(e.request,cp));return r;}).catch(()=>caches.match(e.request).then(r=>r||caches.match('./index.html'))));});
 `);
+
+// the app compares this with its own build to offer '앱 새로고침' when a new version is online
+await writeFile(r('dist/pwa/version.json'), JSON.stringify({ v: CACHE_VERSION, built: new Date().toISOString() }));
 
 for (const f of await readdir(r('public'))) await copyFile(r('public', f), r('dist/pwa', f));
 

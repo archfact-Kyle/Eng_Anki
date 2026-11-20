@@ -39,6 +39,35 @@ function confirmBox(text, okLabel, fn, danger) {
   });
 }
 
+// ---------------- app refresh (iPhone home-screen apps have no reload button / pull-to-refresh) ----------------
+/* global __APP_VERSION__ */
+const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev';
+const verLabel = (v) => (v && /-v(\d+)$/.test(v)) ? 'v' + v.match(/-v(\d+)$/)[1] : (v || '–');
+const upd = { latest: null, checked: false, busy: false };
+async function checkUpdate() {
+  if (window.claude || !/^https?:$/.test(location.protocol)) return null;   // artifact: no version file to compare
+  try {
+    const r = await fetch('version.json?t=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return null;
+    upd.latest = (await r.json()).v || null;
+  } catch (e) { /* offline → keep what we know */ }
+  upd.checked = true; return upd.latest;
+}
+const hasUpdate = () => !!(upd.latest && upd.latest !== APP_VERSION && APP_VERSION !== 'dev');
+async function appRefresh() {
+  if (upd.busy) return; upd.busy = true;
+  toast('앱을 새로 불러오는 중… (카드와 기록은 그대로예요)');
+  // 1) save anything still waiting in the 250 ms write buffer, so no review is lost
+  try { clearTimeout(store._localTimer); await store.flushLocal(); } catch (e) {}
+  try { if (store.cloudStatus === 'on') { clearTimeout(store._cloudTimer); await store.flushCloud(); } } catch (e) {}
+  // 2) drop the offline copy of the app files (only app files — IndexedDB data is untouched)
+  try { if ('serviceWorker' in navigator) { const regs = await navigator.serviceWorker.getRegistrations(); await Promise.all(regs.map((r) => r.unregister())); } } catch (e) {}
+  try { if (window.caches) { const ks = await caches.keys(); await Promise.all(ks.filter((k) => k.startsWith('ankiwords')).map((k) => caches.delete(k))); } } catch (e) {}
+  // 3) reload from the network; a fresh query string also skips Safari's HTTP cache
+  if (window.claude) return location.reload();
+  const u = new URL(location.href); u.searchParams.set('r', Date.now().toString(36)); location.replace(u.toString());
+}
+
 // ---------------- TTS ----------------
 // iOS/macOS ship joke & robotic voices tagged en-US (Albert, Bubbles, Zarvox, Eloquence voices …).
 // Picking "the first en-US voice" often lands on one of them → rank voices by quality instead.
@@ -138,6 +167,7 @@ function renderHome() {
     : '<p class="small muted">적정 범위(75~90%)예요. 지금처럼 매일 하세요.</p>';
   app().innerHTML = `
   <header class="hero"><h1>영어 문장 Anki</h1><p class="sub">AJATT · MCD · Antimoon 방식 · FSRS 복습</p>${cloudBadge()}</header>
+  ${hasUpdate() ? `<section class="card remind" id="update-banner"><b>🔄 새 버전이 있어요</b><p class="small muted">${verLabel(APP_VERSION)} → ${verLabel(upd.latest)}. 카드와 복습 기록은 그대로 두고 앱 화면만 새로 받아요.</p><button class="btn primary" data-act="app-refresh">지금 새로고침</button></section>` : ''}
   ${empty ? `<section class="card empty"><h2>첫 문장을 넣어볼까요?</h2><p>AJATT의 핵심은 <b>단어가 아닌 문장</b>을 모으는 것, Antimoon의 핵심은 <b>검증된 예문</b>을 입력하는 것입니다.</p>
     <div class="row"><button class="btn primary" data-act="sample">예제 덱 불러오기</button><button class="btn" data-go="add">직접 추가</button></div></section>` : ''}
   ${!empty && store.cloudStatus !== 'on' && Date.now() - (store.meta.lastBackup || 0) > 7 * 86400e3 ? `<section class="card remind"><b>💾 백업할 때가 됐어요</b><p class="small muted">카드가 이 기기에만 저장돼 있어요. ${store.meta.lastBackup ? '마지막 백업 ' + Math.floor((Date.now() - store.meta.lastBackup) / 86400e3) + '일 전.' : '아직 백업한 적이 없어요.'}</p><button class="btn" data-act="exp-json">지금 백업</button></section>` : ''}
@@ -685,6 +715,11 @@ function renderSettings() {
     <button class="btn" data-act="imp-paste">붙여넣은 내용 복원</button>
     <p class="tip">복원은 현재 카드와 <b>합치기</b> 방식입니다. 같은 카드는 더 최근에 수정된 쪽이 남습니다. 문장 목록(CSV·TSV·TXT, Anki 내보내기 텍스트)은 <button class="link" data-go-add-bulk>추가 → 일괄 가져오기</button>를 쓰세요.</p>
   </section>
+  <section class="card form" id="app-section"><h3>앱</h3>
+    <p class="small">현재 버전 <b>${verLabel(APP_VERSION)}</b>${window.claude ? '' : hasUpdate() ? ` · <span class="green">새 버전 ${verLabel(upd.latest)} 있음</span>` : upd.checked && upd.latest ? ' · 최신 버전이에요' : ''}</p>
+    <button class="btn ${hasUpdate() ? 'primary' : ''}" data-act="app-refresh">🔄 앱 새로고침</button>
+    <p class="tip">화면이 이상하거나 새 기능이 안 보일 때 누르세요. 저장 안 된 복습을 먼저 저장하고, 앱 파일만 새로 받아요. 카드와 복습 기록은 지워지지 않아요.</p>
+  </section>
   <section class="card form"><h3>위험 구역</h3><button class="btn danger" data-act="wipe">모든 카드 삭제</button></section>
   <p class="muted small center">스케줄러: FSRS (ts-fsrs) · Anki 23.10+와 같은 알고리즘 계열</p>`;
 }
@@ -765,6 +800,7 @@ document.addEventListener('click', (e) => {
   else if (a === 'rec-play') recPlay();
   else if (a === 'tts-test') speak("I've been meaning to ask you something. Could we push the meeting back to Thursday?");
   else if (a === 'exp-json') exportBackup();
+  else if (a === 'app-refresh') appRefresh();
   else if (a === 'imp-paste') { const v = $('#imp-text').value.trim(); if (!v) return toast('백업 내용을 붙여넣으세요'); doImport(v); }
   else if (a === 'copy-json') navigator.clipboard.writeText(store.exportJSON()).then(() => toast('백업 내용을 복사했어요. 메모 앱 등에 붙여넣어 보관하세요'), () => toast('복사가 막혀 있어요'));
   else if (a === 'exp-tsv') exportTSV();
@@ -814,6 +850,11 @@ document.addEventListener('keydown', (e) => {
   store.connectCloud();
   if (window.claude && window.claude.use && !('speechSynthesis' in window)) window.claude.use('tts').then((t) => { claudeTTS = t; }).catch(() => {});
   if ('serviceWorker' in navigator && location.protocol === 'https:' && !/claude|anthropic/.test(location.hostname)) navigator.serviceWorker.register('sw.js').catch(() => {});
+  // after an app refresh, tidy the URL (?r=…) and say which version is running
+  if (/[?&]r=/.test(location.search)) { const u = new URL(location.href); u.searchParams.delete('r'); history.replaceState(null, '', u.toString()); setTimeout(() => toast('앱을 새로 불러왔어요 · ' + verLabel(APP_VERSION)), 300); }
+  const recheck = () => checkUpdate().then(() => { if (hasUpdate() && (view === 'home' || view === 'settings')) render(true); });
+  recheck();
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) recheck(); });   // came back to the app
   setInterval(() => { if (view === 'home' && !$('#modal').classList.contains('show')) render(true); }, 60e3);
 })();
 void uid;

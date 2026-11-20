@@ -47,6 +47,7 @@ npm test                         # 단위(node:test) + e2e(Playwright, iPhone 13
 
 ## 배포
 - GitHub Pages: `main`에 push하면 `.github/workflows/pages.yml`이 빌드해 `dist/pwa`를 배포(저장소 Settings → Pages → Source: GitHub Actions).
+- 빌드가 `dist/pwa/version.json`({v: CACHE_VERSION})을 쓰고, 앱은 시작·복귀 때 이것과 자기 버전(`__APP_VERSION__`)을 비교해 홈에 "새 버전" 배너를 띄운다. 설정 → 앱 → "앱 새로고침"은 쓰기 버퍼 저장 → 서비스워커·캐시 삭제 → `?r=` 붙여 다시 불러오기(IndexedDB 데이터는 건드리지 않음).
 - claude.ai 아티팩트 버전(dist/artifact/index.html)은 Claude 데스크톱 앱(Cowork)에서 재게시한다. Claude Code에서는 빌드까지만.
 
 ## 하지 말 것

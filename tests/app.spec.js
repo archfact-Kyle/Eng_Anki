@@ -223,3 +223,30 @@ test('stats: answer time + mature reviews are recorded, graph shows count and ti
   await page.screenshot({ path: 'test-results/stats-forecast.png', fullPage: true });
   expect(errors).toEqual([]);
 });
+
+test('app refresh: saves pending reviews, reloads, keeps data; banner when a newer version is online', async ({ page }) => {
+  const errors = []; page.on('pageerror', (e) => errors.push(e.message));
+  await page.goto('/');
+  await page.click('[data-act=sample]');
+  await page.click('nav button[data-v=review]');
+  await page.click('[data-act=intro-ok]');                        // a write sits in the 250 ms buffer…
+  await page.click('nav button[data-v=settings]');
+  await expect(page.locator('#app-section')).toContainText('현재 버전 v');
+  await expect(page.locator('#app-section')).toContainText('최신 버전이에요');
+  await page.click('#app-section [data-act=app-refresh]');      // …and refresh right away
+  await page.waitForURL((u) => !u.search.includes('r='));        // reloaded, ?r= tidied away
+  await expect(page.locator('#toast')).toContainText('앱을 새로 불러왔어요');
+  const db = await readDB(page, 100);
+  const notes = Object.entries(db).filter(([k]) => k !== '_meta').map(([, n]) => n);
+  expect(notes.length).toBeGreaterThan(0);
+  expect(notes.some((n) => Object.values(n.cards).some((c) => c.iv))).toBe(true);   // the intro was saved
+
+  await page.route('**/version.json*', (r) => r.fulfill({ contentType: 'application/json', body: JSON.stringify({ v: 'ankiwords-v999' }) }));
+  await page.reload();
+  await expect(page.locator('#update-banner')).toContainText('v999');
+  await page.screenshot({ path: 'test-results/update-banner.png' });
+  await page.click('nav button[data-v=settings]');
+  await expect(page.locator('#app-section')).toContainText('새 버전 v999 있음');
+  await page.locator('#app-section').screenshot({ path: 'test-results/app-section.png' });
+  expect(errors).toEqual([]);
+});
